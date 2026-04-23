@@ -83,6 +83,10 @@ class MathOCRSystem:
 3. 保持原有的题目结构和编号
 4. 如果有多个题目，分别识别并标注题号
 
+特别注意题目类型：
+- 例题：以"例"字开头的题目，如"例1.1"、"例2.3.1"等，这类题目通常包含题目和答案两部分
+- 习题：以数字编号开头的题目，如"1.1.1"、"2.3.4"等，这类题目通常只有题目没有答案
+
 请仅返回识别到的内容。"""
         
         messages = [
@@ -119,16 +123,26 @@ class MathOCRSystem:
     
     def parse_questions(self, ocr_text: str) -> List[Dict[str, Any]]:
         system_prompt = """你是数学题目解析助手。请将以下数学内容解析为JSON数组。
+
+题目类型定义：
+- 例题(example)：题号以"例"字开头，如"例1.1"、"例2.3.1"等。这类题目包含题目和答案两部分，都需要提取。
+- 习题(exercise)：题号以纯数字开头，如"1.1.1"、"2.3.4"等。这类题目只有题目部分，注意：习题中不许录入提示词条，只保留纯粹的题目内容。
+
 格式要求：
 [
   {
-    "question_number": "题号",
-    "question_content": "题目内容（LaTeX公式）",
+    "question_number": "题号，如'例1.1'或'1.1.1'",
+    "question_type": "题目类型，只能是'example'或'exercise'",
+    "question_content": "题目内容（LaTeX公式），对于习题：只保留纯粹的题目内容，删除所有提示词条（如'提示'、'思路'、'注意'等开头的内容）",
+    "answer_content": "答案内容（仅例题有，LaTeX公式），习题此字段为空字符串",
     "raw_text": "完整原始文本"
   }
 ]
 
-只输出JSON，不要其他内容。"""
+重要规则：
+1. 习题(question_type='exercise')的question_content中绝对不能包含任何提示词条，只保留纯粹的题目本身
+2. 例题(question_type='example')需要同时提取题目和答案
+3. 只输出JSON，不要其他内容"""
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -197,11 +211,67 @@ class MathOCRSystem:
         
         return ''.join(result)
     
+    def _filter_hint_keywords(self, text: str) -> str:
+        hint_patterns = [
+            "提示", "思路", "注意", "说明", "分析", "思考",
+            "【提示】", "【思路】", "【注意】", "【说明】",
+            "提示：", "思路：", "注意：", "说明：",
+            "提示:", "思路:", "注意:", "说明:"
+        ]
+        
+        lines = text.split("\n")
+        filtered_lines = []
+        in_hint_section = False
+        
+        for line in lines:
+            is_hint_line = False
+            for pattern in hint_patterns:
+                if pattern in line:
+                    is_hint_line = True
+                    in_hint_section = True
+                    break
+            
+            if is_hint_line:
+                continue
+            
+            if in_hint_section:
+                if line.strip() == "" or line.strip().startswith("例") or \
+                   (line.strip() and line.strip()[0].isdigit() and "." in line.strip()):
+                    in_hint_section = False
+                else:
+                    continue
+            
+            filtered_lines.append(line)
+        
+        return "\n".join(filtered_lines).strip()
+    
+    def _post_process_questions(self, questions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        processed = []
+        
+        for q in questions:
+            q_copy = q.copy()
+            question_type = q_copy.get("question_type", "")
+            
+            if question_type == "exercise":
+                original_content = q_copy.get("question_content", "")
+                filtered_content = self._filter_hint_keywords(original_content)
+                q_copy["question_content"] = filtered_content
+                q_copy["answer_content"] = ""
+            
+            q_copy.setdefault("question_type", "exercise")
+            q_copy.setdefault("answer_content", "")
+            
+            processed.append(q_copy)
+        
+        return processed
+    
     def store_questions(self, questions: List[Dict[str, Any]], source: str = ""):
         self._init_chroma()
         
         if not questions:
             return
+        
+        questions = self._post_process_questions(questions)
         
         ids = []
         documents = []
@@ -210,9 +280,17 @@ class MathOCRSystem:
         for i, q in enumerate(questions):
             qid = f"q_{source}_{hash(q.get('question_content', ''))}_{i}"
             ids.append(qid)
-            documents.append(q.get("question_content", ""))
+            
+            content_parts = [q.get("question_content", "")]
+            answer = q.get("answer_content", "")
+            if answer:
+                content_parts.append(f"\n【答案】{answer}")
+            documents.append("\n".join(content_parts))
+            
             metadatas.append({
                 "question_number": q.get("question_number", ""),
+                "question_type": q.get("question_type", "exercise"),
+                "answer_content": q.get("answer_content", ""),
                 "raw_text": q.get("raw_text", ""),
                 "source": source
             })
@@ -310,15 +388,27 @@ def _cli_process(args):
             json.dump(questions, f, ensure_ascii=False, indent=2)
         print(f"Results saved to: {args.output}")
     
+    example_count = sum(1 for q in questions if q.get('question_type') == 'example')
+    exercise_count = sum(1 for q in questions if q.get('question_type') == 'exercise')
+    
     print(f"\nTotal questions extracted: {len(questions)}")
+    print(f"  - Examples (例题): {example_count}")
+    print(f"  - Exercises (习题): {exercise_count}")
+    
     if questions and not args.quiet:
         print("\n" + "=" * 60)
         print("Extracted Questions Preview:")
         print("=" * 60)
         for i, q in enumerate(questions[:3]):
-            print(f"\n--- Question {i + 1} ---")
+            q_type = q.get('question_type', 'exercise')
+            type_label = "例题" if q_type == 'example' else "习题"
+            print(f"\n--- Question {i + 1} [{type_label}] ---")
             print(f"Number: {q.get('question_number', 'N/A')}")
+            print(f"Type: {q_type}")
             print(f"Content: {q.get('question_content', 'N/A')[:200]}...")
+            answer = q.get('answer_content', '')
+            if answer:
+                print(f"Answer: {answer[:150]}...")
         if len(questions) > 3:
             print(f"\n... and {len(questions) - 3} more questions")
 
@@ -337,8 +427,12 @@ def _cli_search(args):
         print(f"\nFound {len(results)} results for query: {args.query}")
         print("=" * 60)
         for i, r in enumerate(results):
-            print(f"\n--- Result {i + 1} ---")
+            q_type = r['metadata'].get('question_type', 'exercise')
+            type_label = "例题" if q_type == 'example' else "习题"
+            print(f"\n--- Result {i + 1} [{type_label}] ---")
             print(f"ID: {r['id']}")
+            print(f"Number: {r['metadata'].get('question_number', 'N/A')}")
+            print(f"Type: {q_type}")
             print(f"Content: {r['content']}")
             print(f"Source: {r['metadata'].get('source', 'N/A')}")
 
@@ -354,13 +448,23 @@ def _cli_list(args):
         print(f"Results saved to: {args.output}")
     
     if not args.quiet:
+        example_count = sum(1 for q in questions if q['metadata'].get('question_type') == 'example')
+        exercise_count = sum(1 for q in questions if q['metadata'].get('question_type') == 'exercise')
+        
         print(f"\nTotal questions in database: {len(questions)}")
+        print(f"  - Examples (例题): {example_count}")
+        print(f"  - Exercises (习题): {exercise_count}")
+        
         if questions:
             print("=" * 60)
             limit = args.limit if args.limit else len(questions)
             for i, q in enumerate(questions[:limit]):
-                print(f"\n--- Question {i + 1} ---")
+                q_type = q['metadata'].get('question_type', 'exercise')
+                type_label = "例题" if q_type == 'example' else "习题"
+                print(f"\n--- Question {i + 1} [{type_label}] ---")
                 print(f"ID: {q['id']}")
+                print(f"Number: {q['metadata'].get('question_number', 'N/A')}")
+                print(f"Type: {q_type}")
                 print(f"Content: {q['content'][:150]}...")
                 print(f"Source: {q['metadata'].get('source', 'N/A')}")
 
