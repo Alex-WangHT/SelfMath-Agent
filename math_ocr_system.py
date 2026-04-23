@@ -83,9 +83,11 @@ class MathOCRSystem:
 3. 保持原有的题目结构和编号
 4. 如果有多个题目，分别识别并标注题号
 
-特别注意题目类型：
+特别注意题目类型和边界标识：
 - 例题：以"例"字开头的题目，如"例1.1"、"例2.3.1"等，这类题目通常包含题目和答案两部分
 - 习题：以数字编号开头的题目，如"1.1.1"、"2.3.4"等，这类题目通常只有题目没有答案
+
+重要：请完整保留所有内容，包括题目之间的过渡文字，这些信息对于判断题目是否跨页非常重要。
 
 请仅返回识别到的内容。"""
         
@@ -128,21 +130,29 @@ class MathOCRSystem:
 - 例题(example)：题号以"例"字开头，如"例1.1"、"例2.3.1"等。这类题目包含题目和答案两部分，都需要提取。
 - 习题(exercise)：题号以纯数字开头，如"1.1.1"、"2.3.4"等。这类题目只有题目部分，注意：习题中不许录入提示词条，只保留纯粹的题目内容。
 
+重要判断规则：
+1. 判断题目是否完整：如果当前内容以新的题号开头，则上一个题目完整；如果内容在页面末尾突然中断，没有新的题号，则该题目可能跨页，需要标记is_incomplete=true
+2. 题目边界：新的题号（以"例"或数字开头）标志着新题目的开始
+3. 答案识别：例题通常在题目后有"【答案】"、"解："、"证明："、"分析："等标识
+
 格式要求：
 [
   {
     "question_number": "题号，如'例1.1'或'1.1.1'",
     "question_type": "题目类型，只能是'example'或'exercise'",
-    "question_content": "题目内容（LaTeX公式），对于习题：只保留纯粹的题目内容，删除所有提示词条（如'提示'、'思路'、'注意'等开头的内容）",
+    "question_content": "题目内容（LaTeX公式），对于习题：只保留纯粹的题目内容，删除所有提示词条",
     "answer_content": "答案内容（仅例题有，LaTeX公式），习题此字段为空字符串",
-    "raw_text": "完整原始文本"
+    "raw_text": "完整原始文本",
+    "is_incomplete": "布尔值，如果题目可能跨页（内容不完整）则为true，否则为false",
+    "page_hint": "该题目的页码范围提示，如'第3-4页'"
   }
 ]
 
 重要规则：
 1. 习题(question_type='exercise')的question_content中绝对不能包含任何提示词条，只保留纯粹的题目本身
 2. 例题(question_type='example')需要同时提取题目和答案
-3. 只输出JSON，不要其他内容"""
+3. 仔细判断每个题目是否完整，如果内容中断且没有新的题号开始，标记is_incomplete=true
+4. 只输出JSON，不要其他内容"""
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -210,6 +220,190 @@ class MathOCRSystem:
                 break
         
         return ''.join(result)
+    
+    def _detect_question_patterns(self, text: str) -> List[Dict[str, Any]]:
+        import re
+        
+        patterns = []
+        
+        example_pattern = r'例\d+(\.\d+)*'
+        for match in re.finditer(example_pattern, text):
+            patterns.append({
+                "type": "example",
+                "number": match.group(),
+                "start_index": match.start(),
+                "end_index": match.end()
+            })
+        
+        exercise_pattern = r'(?<![\.0-9])\d+\.\d+(\.\d+)+(?!\d)'
+        for match in re.finditer(exercise_pattern, text):
+            patterns.append({
+                "type": "exercise",
+                "number": match.group(),
+                "start_index": match.start(),
+                "end_index": match.end()
+            })
+        
+        patterns.sort(key=lambda x: x["start_index"])
+        return patterns
+    
+    def _is_potential_question_start(self, text: str) -> bool:
+        import re
+        
+        if re.match(r'^\s*例\d+', text):
+            return True
+        
+        if re.match(r'^\s*\d+\.\d+\.\d+', text):
+            return True
+        
+        return False
+    
+    def _merge_cross_page_questions(
+        self,
+        page_results: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        if not page_results:
+            return []
+        
+        merged_questions = []
+        pending_question = None
+        
+        for page_info in page_results:
+            page_num = page_info["page_num"]
+            questions = page_info.get("questions", [])
+            ocr_text = page_info.get("ocr_text", "")
+            
+            for q in questions:
+                is_incomplete = q.get("is_incomplete", False)
+                q_number = q.get("question_number", "")
+                
+                if pending_question is not None:
+                    if self._is_potential_question_start(q.get("raw_text", "")[:50]):
+                        pending_question["is_incomplete"] = False
+                        if "pages" not in pending_question:
+                            pending_question["pages"] = [pending_question.get("page_num", 0)]
+                        merged_questions.append(pending_question)
+                        pending_question = None
+                    else:
+                        pending_question["question_content"] = (
+                            pending_question.get("question_content", "") + 
+                            "\n" + q.get("question_content", "")
+                        )
+                        pending_question["answer_content"] = (
+                            pending_question.get("answer_content", "") + 
+                            "\n" + q.get("answer_content", "")
+                        )
+                        pending_question["raw_text"] = (
+                            pending_question.get("raw_text", "") + 
+                            "\n" + q.get("raw_text", "")
+                        )
+                        pending_question["pages"] = pending_question.get("pages", []) + [page_num]
+                        pending_question["is_incomplete"] = is_incomplete
+                        
+                        if not is_incomplete:
+                            merged_questions.append(pending_question)
+                            pending_question = None
+                        continue
+                
+                if is_incomplete:
+                    pending_question = q.copy()
+                    pending_question["page_num"] = page_num
+                    pending_question["pages"] = [page_num]
+                else:
+                    q["pages"] = [page_num]
+                    merged_questions.append(q)
+            
+            if pending_question is not None and not questions:
+                pending_question["question_content"] = (
+                    pending_question.get("question_content", "") + 
+                    "\n[页末延续]"
+                )
+        
+        if pending_question is not None:
+            pending_question["is_incomplete"] = False
+            merged_questions.append(pending_question)
+        
+        return merged_questions
+    
+    def _parse_merged_question(
+        self,
+        question: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        merged_text = question.get("raw_text", "")
+        
+        system_prompt = """你是数学题目整合助手。以下是一道可能跨越多页的数学题目的完整合并文本。
+
+请根据以下规则进行整合：
+1. 去除页码标记（如"[页末延续]"）和重复内容
+2. 合并题目内容和答案内容，确保逻辑连贯
+3. 保持LaTeX公式的正确性
+4. 判断题目类型和完整性
+
+输入格式示例：
+{
+  "question_number": "例1.1",
+  "question_type": "example",
+  "question_content": "第一页的题目内容...",
+  "answer_content": "第一页的答案...",
+  "raw_text": "完整合并的原始文本...",
+  "pages": [1, 2, 3]
+}
+
+输出格式：
+{
+  "question_number": "例1.1",
+  "question_type": "example",
+  "question_content": "整合后的完整题目内容",
+  "answer_content": "整合后的完整答案内容",
+  "raw_text": "完整原始文本",
+  "pages": [1, 2, 3],
+  "page_count": 3
+}
+
+请直接输出JSON，不要其他内容。"""
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": json.dumps(question, ensure_ascii=False, indent=2)}
+        ]
+        
+        response = requests.post(
+            f"{self.base_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": self.model,
+                "messages": messages,
+                "max_tokens": 4096,
+                "temperature": 0.0
+            },
+            timeout=120
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Merge API failed: {response.status_code}")
+            return question
+        
+        result = response.json()
+        text = result["choices"][0]["message"]["content"]
+        
+        try:
+            json_str = self._extract_json(text)
+            merged = json.loads(json_str)
+            
+            for key in ["question_number", "question_type", "question_content", "answer_content", "raw_text"]:
+                if key not in merged or not merged[key]:
+                    merged[key] = question.get(key, "")
+            
+            merged["pages"] = question.get("pages", [question.get("page_num", 0)])
+            merged["page_count"] = len(merged["pages"])
+            
+            return merged
+        except json.JSONDecodeError:
+            logger.error(f"Merge parse failed: {text}")
+            return question
     
     def _filter_hint_keywords(self, text: str) -> str:
         hint_patterns = [
@@ -306,30 +500,64 @@ class MathOCRSystem:
         self,
         pdf_path: str,
         start_page: int = 0,
-        end_page: Optional[int] = None
+        end_page: Optional[int] = None,
+        enable_cross_page_merge: bool = True
     ) -> List[Dict[str, Any]]:
         logger.info(f"Processing PDF: {pdf_path}")
+        if enable_cross_page_merge:
+            logger.info("Cross-page merge enabled")
         
         images = self.pdf_to_images(pdf_path, start_page, end_page)
-        all_questions = []
         pdf_name = Path(pdf_path).stem
         
-        for img_path in images:
-            logger.info(f"OCR processing: {img_path}")
+        page_results = []
+        
+        for page_idx, img_path in enumerate(images):
+            page_num = start_page + page_idx + 1
+            logger.info(f"OCR processing page {page_num}: {img_path}")
+            
             ocr_text = self.ocr_image(img_path)
             logger.info(f"OCR result length: {len(ocr_text)}")
             
             questions = self.parse_questions(ocr_text)
-            logger.info(f"Parsed {len(questions)} questions")
+            logger.info(f"Parsed {len(questions)} questions on page {page_num}")
             
             for q in questions:
                 q["source_image"] = img_path
                 q["source_pdf"] = pdf_path
+                q["page_num"] = page_num
             
-            all_questions.extend(questions)
+            page_results.append({
+                "page_num": page_num,
+                "page_idx": page_idx,
+                "image_path": img_path,
+                "ocr_text": ocr_text,
+                "questions": questions
+            })
+        
+        if enable_cross_page_merge and len(page_results) > 1:
+            logger.info("Merging cross-page questions...")
+            merged_questions = self._merge_cross_page_questions(page_results)
+            logger.info(f"After merge: {len(merged_questions)} questions")
             
-            if questions:
-                self.store_questions(questions, source=pdf_name)
+            final_questions = []
+            for q in merged_questions:
+                pages = q.get("pages", [q.get("page_num", 0)])
+                if len(pages) > 1:
+                    logger.info(f"Question {q.get('question_number', 'N/A')} spans pages: {pages}")
+                    merged_q = self._parse_merged_question(q)
+                    final_questions.append(merged_q)
+                else:
+                    final_questions.append(q)
+            
+            all_questions = final_questions
+        else:
+            all_questions = []
+            for pr in page_results:
+                all_questions.extend(pr["questions"])
+        
+        if all_questions:
+            self.store_questions(all_questions, source=pdf_name)
         
         logger.info(f"Total questions extracted: {len(all_questions)}")
         return all_questions
@@ -380,8 +608,14 @@ def _cli_process(args):
     
     print(f"Processing PDF: {args.pdf}")
     print(f"Pages: {start_page + 1} - {end_page if end_page else 'end'}")
+    print(f"Cross-page merge: {'Enabled' if not args.no_cross_page else 'Disabled'}")
     
-    questions = system.process_pdf(args.pdf, start_page, end_page)
+    questions = system.process_pdf(
+        args.pdf, 
+        start_page, 
+        end_page,
+        enable_cross_page_merge=not args.no_cross_page
+    )
     
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
@@ -390,10 +624,13 @@ def _cli_process(args):
     
     example_count = sum(1 for q in questions if q.get('question_type') == 'example')
     exercise_count = sum(1 for q in questions if q.get('question_type') == 'exercise')
+    cross_page_count = sum(1 for q in questions if len(q.get('pages', [])) > 1)
     
     print(f"\nTotal questions extracted: {len(questions)}")
     print(f"  - Examples (例题): {example_count}")
     print(f"  - Exercises (习题): {exercise_count}")
+    if cross_page_count > 0:
+        print(f"  - Cross-page questions (跨页题目): {cross_page_count}")
     
     if questions and not args.quiet:
         print("\n" + "=" * 60)
@@ -402,7 +639,10 @@ def _cli_process(args):
         for i, q in enumerate(questions[:3]):
             q_type = q.get('question_type', 'exercise')
             type_label = "例题" if q_type == 'example' else "习题"
-            print(f"\n--- Question {i + 1} [{type_label}] ---")
+            pages = q.get('pages', [q.get('page_num', 0)])
+            page_info = f" (跨页: {pages})" if len(pages) > 1 else f" (页: {pages[0]})"
+            
+            print(f"\n--- Question {i + 1} [{type_label}]{page_info} ---")
             print(f"Number: {q.get('question_number', 'N/A')}")
             print(f"Type: {q_type}")
             print(f"Content: {q.get('question_content', 'N/A')[:200]}...")
@@ -475,9 +715,19 @@ def _main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Basic usage with cross-page merge (default)
   python math_ocr_system.py process --pdf exercises.pdf --start 0 --end 10
+  
+  # Disable cross-page merge
+  python math_ocr_system.py process --pdf book.pdf --no-cross-page
+  
+  # Save results to JSON
   python math_ocr_system.py process --pdf book.pdf -o results.json
+  
+  # Search questions
   python math_ocr_system.py search --query "求极限" --limit 5
+  
+  # List all questions
   python math_ocr_system.py list --limit 10
         """
     )
@@ -488,6 +738,8 @@ Examples:
     process_parser.add_argument("--pdf", required=True, help="Path to PDF file")
     process_parser.add_argument("--start", type=int, help="Start page number (0-based)")
     process_parser.add_argument("--end", type=int, help="End page number (exclusive)")
+    process_parser.add_argument("--no-cross-page", action="store_true", 
+                               help="Disable cross-page question merging")
     process_parser.add_argument("-o", "--output", help="Output JSON file path")
     process_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
     
