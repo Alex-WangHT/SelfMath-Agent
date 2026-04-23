@@ -1,4 +1,6 @@
 import os
+import sys
+import argparse
 import base64
 import json
 import fitz
@@ -286,3 +288,133 @@ class MathOCRSystem:
             })
         
         return questions
+
+
+def _cli_process(args):
+    system = MathOCRSystem()
+    
+    if not os.path.exists(args.pdf):
+        print(f"Error: File not found: {args.pdf}")
+        sys.exit(1)
+    
+    start_page = args.start if args.start is not None else 0
+    end_page = args.end
+    
+    print(f"Processing PDF: {args.pdf}")
+    print(f"Pages: {start_page + 1} - {end_page if end_page else 'end'}")
+    
+    questions = system.process_pdf(args.pdf, start_page, end_page)
+    
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(questions, f, ensure_ascii=False, indent=2)
+        print(f"Results saved to: {args.output}")
+    
+    print(f"\nTotal questions extracted: {len(questions)}")
+    if questions and not args.quiet:
+        print("\n" + "=" * 60)
+        print("Extracted Questions Preview:")
+        print("=" * 60)
+        for i, q in enumerate(questions[:3]):
+            print(f"\n--- Question {i + 1} ---")
+            print(f"Number: {q.get('question_number', 'N/A')}")
+            print(f"Content: {q.get('question_content', 'N/A')[:200]}...")
+        if len(questions) > 3:
+            print(f"\n... and {len(questions) - 3} more questions")
+
+
+def _cli_search(args):
+    system = MathOCRSystem()
+    
+    results = system.search_questions(args.query, args.limit)
+    
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(results, f, ensure_ascii=False, indent=2)
+        print(f"Results saved to: {args.output}")
+    
+    if not args.quiet:
+        print(f"\nFound {len(results)} results for query: {args.query}")
+        print("=" * 60)
+        for i, r in enumerate(results):
+            print(f"\n--- Result {i + 1} ---")
+            print(f"ID: {r['id']}")
+            print(f"Content: {r['content']}")
+            print(f"Source: {r['metadata'].get('source', 'N/A')}")
+
+
+def _cli_list(args):
+    system = MathOCRSystem()
+    
+    questions = system.get_all_questions()
+    
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(questions, f, ensure_ascii=False, indent=2)
+        print(f"Results saved to: {args.output}")
+    
+    if not args.quiet:
+        print(f"\nTotal questions in database: {len(questions)}")
+        if questions:
+            print("=" * 60)
+            limit = args.limit if args.limit else len(questions)
+            for i, q in enumerate(questions[:limit]):
+                print(f"\n--- Question {i + 1} ---")
+                print(f"ID: {q['id']}")
+                print(f"Content: {q['content'][:150]}...")
+                print(f"Source: {q['metadata'].get('source', 'N/A')}")
+
+
+def _main():
+    parser = argparse.ArgumentParser(
+        description="Math OCR System - Extract and store math questions from PDFs",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python math_ocr_system.py process --pdf exercises.pdf --start 0 --end 10
+  python math_ocr_system.py process --pdf book.pdf -o results.json
+  python math_ocr_system.py search --query "求极限" --limit 5
+  python math_ocr_system.py list --limit 10
+        """
+    )
+    
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    
+    process_parser = subparsers.add_parser("process", help="Process PDF and extract questions")
+    process_parser.add_argument("--pdf", required=True, help="Path to PDF file")
+    process_parser.add_argument("--start", type=int, help="Start page number (0-based)")
+    process_parser.add_argument("--end", type=int, help="End page number (exclusive)")
+    process_parser.add_argument("-o", "--output", help="Output JSON file path")
+    process_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
+    
+    search_parser = subparsers.add_parser("search", help="Search questions in vector database")
+    search_parser.add_argument("--query", required=True, help="Search query")
+    search_parser.add_argument("--limit", type=int, default=5, help="Number of results (default: 5)")
+    search_parser.add_argument("-o", "--output", help="Output JSON file path")
+    search_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
+    
+    list_parser = subparsers.add_parser("list", help="List all questions in database")
+    list_parser.add_argument("--limit", type=int, help="Limit number of results to display")
+    list_parser.add_argument("-o", "--output", help="Output JSON file path")
+    list_parser.add_argument("-q", "--quiet", action="store_true", help="Suppress output")
+    
+    args = parser.parse_args()
+    
+    if not args.command:
+        parser.print_help()
+        sys.exit(0)
+    
+    try:
+        if args.command == "process":
+            _cli_process(args)
+        elif args.command == "search":
+            _cli_search(args)
+        elif args.command == "list":
+            _cli_list(args)
+    except Exception as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    _main()
