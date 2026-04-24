@@ -17,9 +17,101 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+DEFAULT_PROMPTS = {
+    "ocr_image": {
+        "system_prompt": """你是一个专业的数学OCR识别助手。请仔细识别图片中的数学内容：
+1. 完整识别所有数学公式，使用LaTeX格式
+2. 识别所有文字说明和题目要求
+3. 保持原有的题目结构和编号
+4. 如果有多个题目，分别识别并标注题号
+
+特别注意题目类型和边界标识：
+- 例题：以"例"字开头的题目，如"例1.1"、"例2.3.1"等，这类题目通常包含题目和答案两部分
+- 习题：以数字编号开头的题目，如"1.1.1"、"2.3.4"等，这类题目通常只有题目没有答案
+
+重要：请完整保留所有内容，包括题目之间的过渡文字，这些信息对于判断题目是否跨页非常重要。
+
+请仅返回识别到的内容。""",
+        "user_text": "识别这张图片中的数学内容。"
+    },
+    "parse_questions": {
+        "system_prompt": """你是数学题目解析助手。请将以下数学内容解析为JSON数组。
+
+【极其重要的分类规则】
+
+类型1：例题(example)
+- 识别特征：题号以"例"字开头，如"例1.1"、"例2.3.1"、"例5"等
+- 处理规则：必须完整提取【题目内容】和【答案内容】两部分
+- 答案起始标识："【答案】"、"解："、"证明："、"分析："、"解答："、"答案："
+
+类型2：习题(exercise)
+- 识别特征：题号以纯数字开头，如"1.1.1"、"2.3.4"、"5"等
+- 处理规则：只提取【题目内容】，绝对不要提取答案！即使内容中有答案部分，也必须忽略！
+- answer_content字段必须设置为空字符串""
+- 另外：习题中不许录入提示词条，只保留纯粹的题目内容
+
+【题目边界判断规则】
+1. 新的题号（以"例"或数字开头）标志着新题目的开始
+2. 如果内容在页面末尾突然中断，没有新的题号开始，则标记is_incomplete=true
+3. 判断题目是否完整：如果当前内容以新的题号开头，则上一个题目完整
+
+【输出格式要求】
+[
+  {
+    "question_number": "题号，如'例1.1'或'1.1.1'",
+    "question_type": "题目类型，只能是'example'或'exercise'",
+    "question_content": "题目内容（LaTeX公式），习题只保留纯粹的题目内容，删除所有提示词条",
+    "answer_content": "答案内容（仅例题有，LaTeX公式），习题此字段必须为空字符串''",
+    "raw_text": "该题目的完整原始文本",
+    "is_incomplete": "布尔值，如果题目可能跨页（内容不完整）则为true，否则为false",
+    "page_hint": "该题目的页码范围提示，如'第3-4页'"
+  }
+]
+
+【绝对必须遵守的规则】
+1. 例题(question_type='example')：必须同时提取题目内容和答案内容，answer_content不能空
+2. 习题(question_type='exercise')：只提取题目内容，answer_content必须是空字符串""！即使原文有答案也必须忽略！
+3. 习题的question_content中绝对不能包含任何提示词条（如"提示"、"思路"、"注意"等）
+4. 仔细判断每个题目是否完整，如果内容中断且没有新的题号开始，标记is_incomplete=true
+5. 只输出JSON数组，不要输出任何其他文字、解释或markdown格式"""
+    },
+    "parse_merged_question": {
+        "system_prompt": """你是数学题目整合助手。以下是一道可能跨越多页的数学题目的完整合并文本。
+
+请根据以下规则进行整合：
+1. 去除页码标记（如"[页末延续]"）和重复内容
+2. 合并题目内容和答案内容，确保逻辑连贯
+3. 保持LaTeX公式的正确性
+4. 判断题目类型和完整性
+
+输入格式示例：
+{
+  "question_number": "例1.1",
+  "question_type": "example",
+  "question_content": "第一页的题目内容...",
+  "answer_content": "第一页的答案...",
+  "raw_text": "完整合并的原始文本...",
+  "pages": [1, 2, 3]
+}
+
+输出格式：
+{
+  "question_number": "例1.1",
+  "question_type": "example",
+  "question_content": "整合后的完整题目内容",
+  "answer_content": "整合后的完整答案内容",
+  "raw_text": "完整原始文本",
+  "pages": [1, 2, 3],
+  "page_count": 3
+}
+
+请直接输出JSON，不要其他内容。"""
+    }
+}
+
 
 class MathOCRSystem:
-    def __init__(self):
+    def __init__(self, prompts_path: Optional[str] = None):
         self.api_key = os.getenv("SILICONFLOW_API_KEY")
         self.base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
         self.model = os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen3-Omni-30B-A3B-Captioner")
@@ -31,8 +123,44 @@ class MathOCRSystem:
         self.db = None
         self.collection = None
         
+        self.prompts = self._load_prompts(prompts_path)
+        
         if not self.api_key:
             raise ValueError("SILICONFLOW_API_KEY not found in environment variables")
+    
+    def _load_prompts(self, prompts_path: Optional[str] = None) -> Dict[str, Any]:
+        if prompts_path is None:
+            prompts_path = os.getenv("PROMPTS_PATH", "./prompts.json")
+        
+        prompts_path = Path(prompts_path)
+        
+        if prompts_path.exists():
+            try:
+                with open(prompts_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                logger.info(f"Loaded prompts from: {prompts_path}")
+                result = {**DEFAULT_PROMPTS}
+                for key, value in loaded.items():
+                    if key in result:
+                        if isinstance(value, dict):
+                            result[key] = {**result[key], **value}
+                        else:
+                            result[key] = value
+                    else:
+                        result[key] = value
+                return result
+            except Exception as e:
+                logger.warning(f"Failed to load prompts from {prompts_path}: {e}, using defaults")
+                return DEFAULT_PROMPTS
+        else:
+            logger.info(f"Prompts file not found at {prompts_path}, using default prompts")
+            return DEFAULT_PROMPTS
+    
+    def get_prompt(self, prompt_key: str, sub_key: Optional[str] = None) -> Any:
+        prompt = self.prompts.get(prompt_key, {})
+        if sub_key:
+            return prompt.get(sub_key, "")
+        return prompt
     
     def _init_chroma(self):
         if self.collection is None:
@@ -77,26 +205,15 @@ class MathOCRSystem:
     def ocr_image(self, image_path: str) -> str:
         base64_img = self._encode_image(image_path)
         
-        system_prompt = """你是一个专业的数学OCR识别助手。请仔细识别图片中的数学内容：
-1. 完整识别所有数学公式，使用LaTeX格式
-2. 识别所有文字说明和题目要求
-3. 保持原有的题目结构和编号
-4. 如果有多个题目，分别识别并标注题号
-
-特别注意题目类型和边界标识：
-- 例题：以"例"字开头的题目，如"例1.1"、"例2.3.1"等，这类题目通常包含题目和答案两部分
-- 习题：以数字编号开头的题目，如"1.1.1"、"2.3.4"等，这类题目通常只有题目没有答案
-
-重要：请完整保留所有内容，包括题目之间的过渡文字，这些信息对于判断题目是否跨页非常重要。
-
-请仅返回识别到的内容。"""
+        system_prompt = self.get_prompt("ocr_image", "system_prompt")
+        user_text = self.get_prompt("ocr_image", "user_text") or "识别这张图片中的数学内容。"
         
         messages = [
             {"role": "system", "content": system_prompt},
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "识别这张图片中的数学内容。"},
+                    {"type": "text", "text": user_text},
                     {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{base64_img}"}}
                 ]
             }
@@ -124,45 +241,7 @@ class MathOCRSystem:
         return result["choices"][0]["message"]["content"]
     
     def parse_questions(self, ocr_text: str) -> List[Dict[str, Any]]:
-        system_prompt = """你是数学题目解析助手。请将以下数学内容解析为JSON数组。
-
-【极其重要的分类规则】
-
-类型1：例题(example)
-- 识别特征：题号以"例"字开头，如"例1.1"、"例2.3.1"等
-- 处理规则：必须完整提取【题目内容】和【答案内容】两部分
-- 答案起始标识："【答案】"、"解："、"证明："、"分析："、"解答："、"答案："
-
-类型2：习题(exercise)
-- 识别特征：题号以纯数字开头，如"1.1.1"、"2.3.4"等
-- 处理规则：只提取【题目内容】，绝对不要提取答案！即使内容中有答案部分，也必须忽略！
-- answer_content字段必须设置为空字符串""
-- 另外：习题中不许录入提示词条，只保留纯粹的题目内容
-
-【题目边界判断规则】
-1. 新的题号（以"例"或数字开头）标志着新题目的开始
-2. 如果内容在页面末尾突然中断，没有新的题号开始，则标记is_incomplete=true
-3. 判断题目是否完整：如果当前内容以新的题号开头，则上一个题目完整
-
-【输出格式要求】
-[
-  {
-    "question_number": "题号，如'例1.1'或'1.1.1'",
-    "question_type": "题目类型，只能是'example'或'exercise'",
-    "question_content": "题目内容（LaTeX公式），习题只保留纯粹的题目内容，删除所有提示词条",
-    "answer_content": "答案内容（仅例题有，LaTeX公式），习题此字段必须为空字符串''",
-    "raw_text": "该题目的完整原始文本",
-    "is_incomplete": "布尔值，如果题目可能跨页（内容不完整）则为true，否则为false",
-    "page_hint": "该题目的页码范围提示，如'第3-4页'"
-  }
-]
-
-【绝对必须遵守的规则】
-1. 例题(question_type='example')：必须同时提取题目内容和答案内容，answer_content不能空
-2. 习题(question_type='exercise')：只提取题目内容，answer_content必须是空字符串""！即使原文有答案也必须忽略！
-3. 习题的question_content中绝对不能包含任何提示词条（如"提示"、"思路"、"注意"等）
-4. 仔细判断每个题目是否完整，如果内容中断且没有新的题号开始，标记is_incomplete=true
-5. 只输出JSON数组，不要输出任何其他文字、解释或markdown格式"""
+        system_prompt = self.get_prompt("parse_questions", "system_prompt")
         
         messages = [
             {"role": "system", "content": system_prompt},
@@ -355,36 +434,7 @@ class MathOCRSystem:
     ) -> Dict[str, Any]:
         merged_text = question.get("raw_text", "")
         
-        system_prompt = """你是数学题目整合助手。以下是一道可能跨越多页的数学题目的完整合并文本。
-
-请根据以下规则进行整合：
-1. 去除页码标记（如"[页末延续]"）和重复内容
-2. 合并题目内容和答案内容，确保逻辑连贯
-3. 保持LaTeX公式的正确性
-4. 判断题目类型和完整性
-
-输入格式示例：
-{
-  "question_number": "例1.1",
-  "question_type": "example",
-  "question_content": "第一页的题目内容...",
-  "answer_content": "第一页的答案...",
-  "raw_text": "完整合并的原始文本...",
-  "pages": [1, 2, 3]
-}
-
-输出格式：
-{
-  "question_number": "例1.1",
-  "question_type": "example",
-  "question_content": "整合后的完整题目内容",
-  "answer_content": "整合后的完整答案内容",
-  "raw_text": "完整原始文本",
-  "pages": [1, 2, 3],
-  "page_count": 3
-}
-
-请直接输出JSON，不要其他内容。"""
+        system_prompt = self.get_prompt("parse_merged_question", "system_prompt")
         
         messages = [
             {"role": "system", "content": system_prompt},
