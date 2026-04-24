@@ -128,32 +128,104 @@ class MathOCRSystem:
         if not self.api_key:
             raise ValueError("SILICONFLOW_API_KEY not found in environment variables")
     
+    def _convert_prompts_to_markdown(self, prompts: Dict[str, Any]) -> str:
+        lines = [
+            "# Math OCR System Prompts",
+            "",
+            "> 此文件存储 MathOCRSystem 使用的所有提示词配置",
+            "> 修改此文件无需改动代码即可调整系统行为",
+            "",
+            "---",
+            ""
+        ]
+        
+        for module_name, module_data in prompts.items():
+            lines.append(f"## {module_name}")
+            lines.append("")
+            
+            if isinstance(module_data, dict):
+                for field_name, field_value in module_data.items():
+                    if field_name == "system_prompt" or field_name == "user_text":
+                        lines.append(f"### {field_name}")
+                        lines.append("```")
+                        lines.append(str(field_value))
+                        lines.append("```")
+                        lines.append("")
+            else:
+                lines.append(f"### value")
+                lines.append("```")
+                lines.append(str(module_data))
+                lines.append("```")
+                lines.append("")
+            
+            lines.append("---")
+            lines.append("")
+        
+        lines.append("## 说明")
+        lines.append("")
+        lines.append("### 格式说明")
+        lines.append("- 每个模块使用 `## 模块名` 标记")
+        lines.append("- 每个子字段使用 `### 字段名` 标记")
+        lines.append("- 实际的prompt内容使用代码块（\\`\\`\\`）包裹")
+        lines.append("")
+        lines.append("### 如何修改")
+        lines.append("1. 找到需要修改的模块和字段")
+        lines.append("2. 修改代码块内的内容")
+        lines.append("3. 保存文件，系统会自动加载新的prompt")
+        lines.append("")
+        lines.append("### 注意事项")
+        lines.append("- 不要修改模块名和字段名（如 `## ocr_image`, `### system_prompt`）")
+        lines.append("- 保持代码块格式，否则可能无法正确解析")
+        lines.append("- 如果格式有问题，系统会自动使用默认内置prompt")
+        
+        return "\n".join(lines)
+    
     def _load_prompts(self, prompts_path: Optional[str] = None) -> Dict[str, Any]:
         if prompts_path is None:
-            prompts_path = os.getenv("PROMPTS_PATH", "./prompts.json")
+            prompts_path = os.getenv("PROMPTS_PATH", "./prompts.md")
         
         prompts_path = Path(prompts_path)
         
-        if prompts_path.exists():
+        if not prompts_path.exists():
+            logger.info(f"Prompts file not found at {prompts_path}, creating from defaults...")
             try:
+                markdown_content = self._convert_prompts_to_markdown(DEFAULT_PROMPTS)
+                prompts_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(prompts_path, "w", encoding="utf-8") as f:
+                    f.write(markdown_content)
+                logger.info(f"Created default prompts file: {prompts_path}")
+            except Exception as e:
+                logger.warning(f"Failed to create prompts file: {e}")
+                return DEFAULT_PROMPTS
+        
+        try:
+            file_ext = prompts_path.suffix.lower()
+            
+            if file_ext == ".json":
                 with open(prompts_path, "r", encoding="utf-8") as f:
                     loaded = json.load(f)
-                logger.info(f"Loaded prompts from: {prompts_path}")
-                result = {**DEFAULT_PROMPTS}
-                for key, value in loaded.items():
-                    if key in result:
-                        if isinstance(value, dict):
-                            result[key] = {**result[key], **value}
-                        else:
-                            result[key] = value
+                logger.info(f"Loaded prompts from JSON: {prompts_path}")
+            elif file_ext == ".md":
+                with open(prompts_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                loaded = self._parse_markdown_prompts(content)
+                logger.info(f"Loaded prompts from Markdown: {prompts_path}")
+            else:
+                logger.warning(f"Unknown prompt file format: {file_ext}, using defaults")
+                return DEFAULT_PROMPTS
+            
+            result = {**DEFAULT_PROMPTS}
+            for key, value in loaded.items():
+                if key in result:
+                    if isinstance(value, dict):
+                        result[key] = {**result[key], **value}
                     else:
                         result[key] = value
-                return result
-            except Exception as e:
-                logger.warning(f"Failed to load prompts from {prompts_path}: {e}, using defaults")
-                return DEFAULT_PROMPTS
-        else:
-            logger.info(f"Prompts file not found at {prompts_path}, using default prompts")
+                else:
+                    result[key] = value
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to load prompts from {prompts_path}: {e}, using defaults")
             return DEFAULT_PROMPTS
     
     def get_prompt(self, prompt_key: str, sub_key: Optional[str] = None) -> Any:
