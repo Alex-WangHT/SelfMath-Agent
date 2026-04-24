@@ -290,10 +290,16 @@ class MathOCRSystem:
             logger.error(f"Parse failed: {text}")
             return []
     
-    def _extract_json(self, text: str) -> str:
-        start = text.find('[')
-        if start == -1:
+    def _extract_json(self, text: str, prefer_object: bool = False) -> str:
+        if prefer_object:
             start = text.find('{')
+            if start == -1:
+                start = text.find('[')
+        else:
+            start = text.find('[')
+            if start == -1:
+                start = text.find('{')
+        
         if start == -1:
             return text
         
@@ -464,8 +470,15 @@ class MathOCRSystem:
         text = result["choices"][0]["message"]["content"]
         
         try:
-            json_str = self._extract_json(text)
+            json_str = self._extract_json(text, prefer_object=True)
             merged = json.loads(json_str)
+            
+            if isinstance(merged, list) and len(merged) > 0:
+                merged = merged[0]
+            
+            if not isinstance(merged, dict):
+                logger.error(f"Merge result is not a dict: {type(merged)}")
+                return question
             
             for key in ["question_number", "question_type", "question_content", "answer_content", "raw_text"]:
                 if key not in merged or not merged[key]:
@@ -475,8 +488,8 @@ class MathOCRSystem:
             merged["page_count"] = len(merged["pages"])
             
             return merged
-        except json.JSONDecodeError:
-            logger.error(f"Merge parse failed: {text}")
+        except json.JSONDecodeError as e:
+            logger.error(f"Merge parse failed: {e}, text: {text[:200]}")
             return question
     
     def _filter_hint_keywords(self, text: str) -> str:
