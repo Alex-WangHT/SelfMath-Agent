@@ -40,12 +40,12 @@ DEFAULT_PROMPTS = {
 【极其重要的分类规则】
 
 类型1：例题(example)
-- 识别特征：题号以"例"字开头，如"例1.1"、"例2.3.1"等
+- 识别特征：题号以"例"字开头，如"例1.1"、"例2.3.1"、"例5"等
 - 处理规则：必须完整提取【题目内容】和【答案内容】两部分
 - 答案起始标识："【答案】"、"解："、"证明："、"分析："、"解答："、"答案："
 
 类型2：习题(exercise)
-- 识别特征：题号以纯数字开头，如"1.1.1"、"2.3.4"等
+- 识别特征：题号以纯数字开头，如"1.1.1"、"2.3.4"、"5"等
 - 处理规则：只提取【题目内容】，绝对不要提取答案！即使内容中有答案部分，也必须忽略！
 - answer_content字段必须设置为空字符串""
 - 另外：习题中不许录入提示词条，只保留纯粹的题目内容
@@ -128,73 +128,17 @@ class MathOCRSystem:
         if not self.api_key:
             raise ValueError("SILICONFLOW_API_KEY not found in environment variables")
     
-    def _parse_markdown_prompts(self, content: str) -> Dict[str, Any]:
-        lines = content.split("\n")
-        result = {}
-        
-        current_module = None
-        current_field = None
-        current_code_block = []
-        in_code_block = False
-        
-        for line in lines:
-            if line.startswith("```"):
-                if in_code_block:
-                    if current_module and current_field:
-                        code_content = "\n".join(current_code_block).strip()
-                        if current_module not in result:
-                            result[current_module] = {}
-                        result[current_module][current_field] = code_content
-                    current_code_block = []
-                    in_code_block = False
-                else:
-                    in_code_block = True
-                continue
-            
-            if in_code_block:
-                current_code_block.append(line)
-                continue
-            
-            if line.startswith("## "):
-                current_module = line[3:].strip()
-                if current_module.startswith("模块: "):
-                    current_module = current_module[4:].strip()
-                current_field = None
-                continue
-            
-            if line.startswith("### "):
-                field_name = line[4:].strip()
-                if field_name in ["system_prompt", "user_text"]:
-                    current_field = field_name
-                else:
-                    current_field = None
-                continue
-        
-        return result
-    
     def _load_prompts(self, prompts_path: Optional[str] = None) -> Dict[str, Any]:
         if prompts_path is None:
-            prompts_path = os.getenv("PROMPTS_PATH", "./prompts.md")
+            prompts_path = os.getenv("PROMPTS_PATH", "./prompts.json")
         
         prompts_path = Path(prompts_path)
         
         if prompts_path.exists():
             try:
-                file_ext = prompts_path.suffix.lower()
-                
-                if file_ext == ".json":
-                    with open(prompts_path, "r", encoding="utf-8") as f:
-                        loaded = json.load(f)
-                    logger.info(f"Loaded prompts from JSON: {prompts_path}")
-                elif file_ext == ".md":
-                    with open(prompts_path, "r", encoding="utf-8") as f:
-                        content = f.read()
-                    loaded = self._parse_markdown_prompts(content)
-                    logger.info(f"Loaded prompts from Markdown: {prompts_path}")
-                else:
-                    logger.warning(f"Unknown prompt file format: {file_ext}, using defaults")
-                    return DEFAULT_PROMPTS
-                
+                with open(prompts_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                logger.info(f"Loaded prompts from: {prompts_path}")
                 result = {**DEFAULT_PROMPTS}
                 for key, value in loaded.items():
                     if key in result:
