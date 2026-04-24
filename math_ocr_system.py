@@ -180,6 +180,50 @@ class MathOCRSystem:
         
         return "\n".join(lines)
     
+    def _parse_markdown_prompts(self, content: str) -> Dict[str, Any]:
+        lines = content.split("\n")
+        result = {}
+        
+        current_module = None
+        current_field = None
+        current_code_block = []
+        in_code_block = False
+        
+        for line in lines:
+            if line.startswith("```"):
+                if in_code_block:
+                    if current_module and current_field:
+                        code_content = "\n".join(current_code_block).strip()
+                        if current_module not in result:
+                            result[current_module] = {}
+                        result[current_module][current_field] = code_content
+                    current_code_block = []
+                    in_code_block = False
+                else:
+                    in_code_block = True
+                continue
+            
+            if in_code_block:
+                current_code_block.append(line)
+                continue
+            
+            if line.startswith("## "):
+                current_module = line[3:].strip()
+                if current_module.startswith("模块: "):
+                    current_module = current_module[4:].strip()
+                current_field = None
+                continue
+            
+            if line.startswith("### "):
+                field_name = line[4:].strip()
+                if field_name in ["system_prompt", "user_text", "value"]:
+                    current_field = field_name
+                else:
+                    current_field = None
+                continue
+        
+        return result
+    
     def _load_prompts(self, prompts_path: Optional[str] = None) -> Dict[str, Any]:
         if prompts_path is None:
             prompts_path = os.getenv("PROMPTS_PATH", "./prompts.md")
