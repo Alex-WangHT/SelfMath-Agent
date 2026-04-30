@@ -5,27 +5,21 @@ import fitz
 import chromadb
 import requests
 import logging
-from dotenv import load_dotenv
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional
 from chromadb.utils import embedding_functions
-
-from langchain.agents import AgentExecutor, create_tool_calling_agent
 from langchain_core.tools import tool
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage, SystemMessage
 
-from .prompts import PromptManager
+from .base_agent import BaseAgent
+from src.prompts import PromptManager
 
 logger = logging.getLogger(__name__)
 
-load_dotenv()
 
-
-class MathOCRAgent:
+class MathOCRAgent(BaseAgent):
     """
     数学 OCR Agent，用于习题集的录用和管理
-    采用 LangChain Agent 架构，支持工具调用和智能决策
+    继承自 BaseAgent 基类，实现题库管理的特定功能
     """
     
     def __init__(
@@ -37,12 +31,9 @@ class MathOCRAgent:
         初始化 MathOCRAgent
         
         Args:
-            prompt_manager: 提示词管理器，如果为 None 则自动创建
-            prompts_path: 提示词文件路径，仅在 prompt_manager 为 None 时使用
+            prompt_manager: 提示词管理器
+            prompts_path: 提示词文件路径
         """
-        self.api_key = os.getenv("SILICONFLOW_API_KEY")
-        self.base_url = os.getenv("SILICONFLOW_BASE_URL", "https://api.siliconflow.cn/v1")
-        self.model = os.getenv("SILICONFLOW_MODEL", "Qwen/Qwen3-Omni-30B-A3B-Captioner")
         self.db_path = os.getenv("CHROMA_DB_PATH", "./data/chroma_db")
         self.collection_name = os.getenv("CHROMA_COLLECTION", "math_questions")
         
@@ -51,16 +42,15 @@ class MathOCRAgent:
         self.db = None
         self.collection = None
         
-        self.prompt_manager = prompt_manager or PromptManager(prompts_path)
-        self.tools = self._create_tools()
-        self.agent_executor = self._create_agent_executor()
-        
-        if not self.api_key:
-            raise ValueError("SILICONFLOW_API_KEY not found in environment variables")
+        super().__init__(
+            prompt_manager=prompt_manager,
+            prompts_path=prompts_path,
+            agent_name="MathOCRAgent"
+        )
     
     def _create_tools(self) -> List:
         """
-        创建 Agent 可用的工具列表
+        创建 MathOCRAgent 特定的工具列表
         
         Returns:
             工具列表
@@ -77,12 +67,12 @@ class MathOCRAgent:
         
         return tools
     
-    def _create_agent_executor(self) -> AgentExecutor:
+    def _get_system_prompt(self) -> str:
         """
-        创建 Agent 执行器
+        获取 MathOCRAgent 的系统提示词
         
         Returns:
-            AgentExecutor 实例
+            系统提示词字符串
         """
         system_prompt = self.prompt_manager.get_prompt("agent", "system_prompt")
         
@@ -109,24 +99,7 @@ class MathOCRAgent:
 
 请根据用户的需求，智能地选择和调用工具。"""
         
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "{input}"),
-            ("agent_scratchpad", "{agent_scratchpad}")
-        ])
-        
-        from langchain_openai import ChatOpenAI
-        
-        llm = ChatOpenAI(
-            model=self.model,
-            api_key=self.api_key,
-            base_url=self.base_url,
-            temperature=0.0
-        )
-        
-        agent = create_tool_calling_agent(llm, self.tools, prompt)
-        
-        return AgentExecutor(agent=agent, tools=self.tools, verbose=True)
+        return system_prompt
     
     def _init_chroma(self):
         """初始化 ChromaDB 连接"""
@@ -756,28 +729,3 @@ class MathOCRAgent:
             所有题目列表
         """
         return self._get_all_questions_tool.invoke({})
-    
-    def invoke(self, input: str) -> Dict[str, Any]:
-        """
-        调用 Agent 执行任务
-        
-        Args:
-            input: 用户输入
-            
-        Returns:
-            Agent 执行结果
-        """
-        return self.agent_executor.invoke({"input": input})
-    
-    def run(self, input: str) -> str:
-        """
-        运行 Agent（简化接口）
-        
-        Args:
-            input: 用户输入
-            
-        Returns:
-            Agent 输出结果
-        """
-        result = self.invoke(input)
-        return result.get("output", "")
