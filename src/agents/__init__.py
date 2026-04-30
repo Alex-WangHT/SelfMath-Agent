@@ -1,4 +1,4 @@
 from .base_agent import BaseAgent
-from .math_ocr_agent import MathOCRAgent
+from .question_bank_agent import QuestionBankManagementAgent
 
-__all__ = ["BaseAgent", "MathOCRAgent"]
+__all__ = ["BaseAgent", "QuestionBankManagementAgent"]
