@@ -1,7 +1,7 @@
 """
 测试：Flask路由
 
-测试 src/services/flask_routes.py
+测试 src/services/flask_routes.py （Web表现层）
 """
 import sys
 import json
@@ -18,12 +18,11 @@ from src.interface import (
     Question,
     QuestionStats,
     UploadResult,
-    IAgentService,
 )
 
 
 class MockServiceForTest:
-    """用于测试的Mock服务"""
+    """用于测试的 Mock 服务"""
     
     def chat(self, message, agent_type, conversation_id, context=None):
         return AgentResponse(
@@ -129,7 +128,7 @@ class TestHealthCheck:
 
 
 class TestChatAPI:
-    """测试聊天API"""
+    """测试聊天 API"""
     
     def test_chat_valid_message(self, client):
         """测试有效消息"""
@@ -170,12 +169,11 @@ class TestChatAPI:
             content_type="application/json"
         )
         
-        # 可能返回400或500，取决于实现
         assert response.status_code in [400, 500]
 
 
 class TestQuestionAPI:
-    """测试题库API"""
+    """测试题库 API"""
     
     def test_get_questions(self, client):
         """测试获取题目列表"""
@@ -229,10 +227,10 @@ class TestQuestionAPI:
 
 
 class TestAgentsAPI:
-    """测试Agent列表API"""
+    """测试 Agent 列表 API"""
     
     def test_list_agents(self, client):
-        """测试列出Agent"""
+        """测试列出 Agent"""
         response = client.get("/api/agents")
         
         assert response.status_code == 200
@@ -244,7 +242,7 @@ class TestAgentsAPI:
 
 
 class TestConversationAPI:
-    """测试对话管理API"""
+    """测试对话管理 API"""
     
     def test_get_conversation(self, client):
         """测试获取对话"""
@@ -271,7 +269,7 @@ class TestErrorHandling:
     """测试错误处理"""
     
     def test_404(self, client):
-        """测试404"""
+        """测试 404"""
         response = client.get("/api/nonexistent")
         
         assert response.status_code == 404
@@ -300,18 +298,23 @@ class TestFileUpload:
 
 
 class TestFlaskAppCreation:
-    """测试Flask应用创建"""
+    """测试 Flask 应用创建"""
     
     def test_create_app_without_service(self):
-        """测试不提供service时创建应用"""
-        # 这会使用默认的MockService
+        """测试不提供 service 时创建应用"""
+        from src.interface import AgentService, get_registry
+        
+        AgentService._instance = None
+        registry = get_registry()
+        registry.clear()
+        
         app = create_app()
         
         assert app is not None
         assert hasattr(app, 'agent_service')
     
     def test_create_app_with_service(self):
-        """测试提供service时创建应用"""
+        """测试提供 service 时创建应用"""
         mock_service = MockServiceForTest()
         app = create_app(agent_service=mock_service)
         
@@ -340,7 +343,7 @@ class TestIntegration:
         resp3 = client.get("/api/questions/stats")
         assert resp3.status_code == 200
         
-        # 4. 列出Agent
+        # 4. 列出 Agent
         resp4 = client.get("/api/agents")
         assert resp4.status_code == 200
         
