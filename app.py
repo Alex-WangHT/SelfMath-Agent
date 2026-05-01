@@ -18,21 +18,48 @@ logger = logging.getLogger(__name__)
 
 USE_MOCK_AGENTS = os.getenv("USE_MOCK_AGENTS", "True").lower() == "true"
 
-try:
-    if USE_MOCK_AGENTS:
-        from src.agents.mock_agent_manager import get_agent_manager
-    else:
-        from src.agents.mock_agent_manager import get_agent_manager
-except ImportError as e:
-    logger.warning(f"Failed to import agent manager: {e}, using fallback")
-    from src.agents.mock_agent_manager import get_agent_manager
+logger.info(f"USE_MOCK_AGENTS = {USE_MOCK_AGENTS}")
+
+MockAgentManager = None
+get_agent_manager = None
+AgentRole = None
+HAS_AGENT_ROLE = False
 
 try:
-    from src.agents.base_agent import AgentRole
+    import importlib.util
+    
+    mock_path = Path(__file__).parent / "src" / "agents" / "mock_agent_manager.py"
+    logger.info(f"Loading MockAgentManager from: {mock_path}")
+    
+    spec = importlib.util.spec_from_file_location("mock_agent_manager", str(mock_path))
+    mock_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mock_module)
+    
+    MockAgentManager = mock_module.MockAgentManager
+    get_agent_manager = mock_module.get_agent_manager
+    
+    logger.info("✓ MockAgentManager loaded successfully (direct file import)")
+    
+except Exception as e:
+    logger.error(f"✗ Failed to load MockAgentManager: {e}")
+    import traceback
+    traceback.print_exc()
+    raise
+
+try:
+    agent_role_path = Path(__file__).parent / "src" / "agents" / "base_agent.py"
+    
+    spec = importlib.util.spec_from_file_location("base_agent", str(agent_role_path))
+    base_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(base_module)
+    
+    AgentRole = base_module.AgentRole
     HAS_AGENT_ROLE = True
-except ImportError:
+    logger.info("✓ AgentRole loaded successfully")
+    
+except Exception as e:
+    logger.warning(f"AgentRole not available (expected in mock mode): {e}")
     HAS_AGENT_ROLE = False
-    logger.warning("AgentRole not available, using string roles")
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "math-learning-agent-secret-key-2024-dev")
@@ -97,16 +124,16 @@ def chat():
             "timestamp": datetime.now().isoformat()
         })
         
-        role_enum = None
-        if HAS_AGENT_ROLE:
+        role_for_agent = agent_role
+        if HAS_AGENT_ROLE and AgentRole:
             try:
-                role_enum = AgentRole(agent_role) if agent_role in [r.value for r in AgentRole] else None
+                role_for_agent = AgentRole(agent_role)
             except ValueError:
-                role_enum = None
+                role_for_agent = agent_role
         
         response = agent_manager.chat(
             user_message=user_message,
-            agent_role=role_enum if role_enum else agent_role,
+            agent_role=role_for_agent,
             session_id=session_id,
             context=session.get("conversation_history", [])
         )
@@ -130,6 +157,8 @@ def chat():
         
     except Exception as e:
         logger.error(f"Chat error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -187,6 +216,8 @@ def upload_pdf():
         
     except Exception as e:
         logger.error(f"PDF upload error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -232,6 +263,8 @@ def upload_image():
         
     except Exception as e:
         logger.error(f"Image upload error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -255,6 +288,8 @@ def get_questions():
         
     except Exception as e:
         logger.error(f"Get questions error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -290,6 +325,8 @@ def search_questions():
         
     except Exception as e:
         logger.error(f"Search questions error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -304,6 +341,8 @@ def get_question_stats():
         })
     except Exception as e:
         logger.error(f"Get stats error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -321,6 +360,8 @@ def get_conversation():
         
     except Exception as e:
         logger.error(f"Get conversation error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -339,6 +380,8 @@ def clear_conversation():
         
     except Exception as e:
         logger.error(f"Clear conversation error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
@@ -353,6 +396,8 @@ def list_agents():
         })
     except Exception as e:
         logger.error(f"List agents error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 
