@@ -120,6 +120,34 @@ class AgentService:
         ]
         logger.info("Mock questions initialized")
     
+    def register_agent(
+        self,
+        agent_id: str,
+        name: str,
+        description: str,
+        capabilities: List[str],
+        factory: Any
+    ):
+        """
+        注册一个 Agent（通用方法）
+        
+        Args:
+            agent_id: Agent 唯一标识
+            name: Agent 名称
+            description: Agent 描述
+            capabilities: 能力列表
+            factory: 工厂函数或实例
+        """
+        self._registry.register(
+            agent_id=agent_id,
+            name=name,
+            description=description,
+            capabilities=capabilities,
+            factory=factory if callable(factory) else lambda: factory
+        )
+        
+        logger.info(f"Agent registered: {agent_id} ({name})")
+    
     def register_mock_agent(
         self,
         agent_id: str,
@@ -138,7 +166,7 @@ class AgentService:
             capabilities: 能力列表
             response_templates: 响应模板（可选）
         """
-        from .mock_agents import MockAgent
+        from src.agents.mock_agents import MockAgent
         
         mock_agent = MockAgent(
             agent_id=agent_id,
