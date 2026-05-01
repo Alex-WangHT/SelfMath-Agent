@@ -11,16 +11,31 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.agents.agent_manager import AgentManager
-from src.agents.base_agent import AgentRole
-
 load_dotenv()
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+USE_MOCK_AGENTS = os.getenv("USE_MOCK_AGENTS", "True").lower() == "true"
+
+try:
+    if USE_MOCK_AGENTS:
+        from src.agents.mock_agent_manager import get_agent_manager
+    else:
+        from src.agents.mock_agent_manager import get_agent_manager
+except ImportError as e:
+    logger.warning(f"Failed to import agent manager: {e}, using fallback")
+    from src.agents.mock_agent_manager import get_agent_manager
+
+try:
+    from src.agents.base_agent import AgentRole
+    HAS_AGENT_ROLE = True
+except ImportError:
+    HAS_AGENT_ROLE = False
+    logger.warning("AgentRole not available, using string roles")
+
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", "math-learning-agent-secret-key-2024")
+app.secret_key = os.getenv("FLASK_SECRET_KEY", "math-learning-agent-secret-key-2024-dev")
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
 app.config["UPLOAD_FOLDER"] = "./data/uploads"
 app.config["TEMP_FOLDER"] = "./data/temp"
@@ -30,7 +45,9 @@ CORS(app)
 Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
 Path(app.config["TEMP_FOLDER"]).mkdir(parents=True, exist_ok=True)
 
-agent_manager = AgentManager()
+agent_manager = get_agent_manager(use_mock=USE_MOCK_AGENTS)
+
+logger.info(f"Agent Manager initialized: {'Mock Mode' if USE_MOCK_AGENTS else 'Real Mode'}")
 
 
 def get_or_create_session() -> str:
@@ -47,10 +64,15 @@ def index():
 
 @app.route("/api/health", methods=["GET"])
 def health_check():
+    agents_info = []
+    if hasattr(agent_manager, 'list_agents'):
+        agents_info = agent_manager.list_agents()
+    
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "agents_available": list(agent_manager.agents.keys())
+        "mode": "mock" if USE_MOCK_AGENTS else "real",
+        "agents_available": [a.get("role", "unknown") for a in agents_info]
     })
 
 
@@ -75,14 +97,16 @@ def chat():
             "timestamp": datetime.now().isoformat()
         })
         
-        try:
-            role_enum = AgentRole(agent_role) if agent_role in [r.value for r in AgentRole] else None
-        except ValueError:
-            role_enum = None
+        role_enum = None
+        if HAS_AGENT_ROLE:
+            try:
+                role_enum = AgentRole(agent_role) if agent_role in [r.value for r in AgentRole] else None
+            except ValueError:
+                role_enum = None
         
         response = agent_manager.chat(
             user_message=user_message,
-            agent_role=role_enum,
+            agent_role=role_enum if role_enum else agent_role,
             session_id=session_id,
             context=session.get("conversation_history", [])
         )
@@ -100,7 +124,8 @@ def chat():
             "success": True,
             "response": response.get("content", ""),
             "agent_role": response.get("agent_role", agent_role),
-            "metadata": response.get("metadata", {})
+            "metadata": response.get("metadata", {}),
+            "mode": "mock" if USE_MOCK_AGENTS else "real"
         })
         
     except Exception as e:
@@ -151,10 +176,13 @@ def upload_pdf():
             "filename": safe_filename,
             "original_filename": file.filename,
             "questions_extracted": result.get("total_questions", 0),
+            "extracted_count": result.get("extracted_count", result.get("total_questions", 0)),
+            "cross_page_count": result.get("cross_page_count", 0),
             "examples": result.get("example_count", 0),
             "exercises": result.get("exercise_count", 0),
             "with_solution": result.get("with_solution_count", 0),
-            "questions": result.get("questions", [])[:10]
+            "questions": result.get("questions", [])[:10],
+            "mode": "mock" if USE_MOCK_AGENTS else "real"
         })
         
     except Exception as e:
@@ -173,7 +201,7 @@ def upload_image():
         if file.filename == "":
             return jsonify({"error": "No selected file"}), 400
         
-        allowed_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp"}
+        allowed_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
         file_ext = Path(file.filename).suffix.lower()
         
         if file_ext not in allowed_extensions:
@@ -198,7 +226,8 @@ def upload_image():
             "filename": safe_filename,
             "original_filename": file.filename,
             "ocr_text": result.get("ocr_text", ""),
-            "questions": result.get("questions", [])
+            "questions": result.get("questions", []),
+            "mode": "mock" if USE_MOCK_AGENTS else "real"
         })
         
     except Exception as e:
@@ -220,7 +249,8 @@ def get_questions():
         return jsonify({
             "success": True,
             "total": len(questions),
-            "questions": questions
+            "questions": questions,
+            "mode": "mock" if USE_MOCK_AGENTS else "real"
         })
         
     except Exception as e:
@@ -228,12 +258,18 @@ def get_questions():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/questions/search", methods=["GET"])
+@app.route("/api/questions/search", methods=["GET", "POST"])
 def search_questions():
     try:
-        query = request.args.get("q", "")
-        n_results = request.args.get("limit", 5, type=int)
-        question_type = request.args.get("type")
+        if request.method == "POST":
+            data = request.get_json() or {}
+            query = data.get("query", "")
+            n_results = data.get("n_results", 5)
+            question_type = data.get("type")
+        else:
+            query = request.args.get("q", "")
+            n_results = request.args.get("limit", 5, type=int)
+            question_type = request.args.get("type")
         
         if not query:
             return jsonify({"error": "Search query is required"}), 400
@@ -248,7 +284,8 @@ def search_questions():
             "success": True,
             "query": query,
             "total": len(results),
-            "results": results
+            "results": results,
+            "mode": "mock" if USE_MOCK_AGENTS else "real"
         })
         
     except Exception as e:
@@ -262,7 +299,8 @@ def get_question_stats():
         stats = agent_manager.get_question_stats()
         return jsonify({
             "success": True,
-            "stats": stats
+            "stats": stats,
+            "mode": "mock" if USE_MOCK_AGENTS else "real"
         })
     except Exception as e:
         logger.error(f"Get stats error: {e}")
@@ -310,11 +348,21 @@ def list_agents():
         agents_info = agent_manager.list_agents()
         return jsonify({
             "success": True,
-            "agents": agents_info
+            "agents": agents_info,
+            "mode": "mock" if USE_MOCK_AGENTS else "real"
         })
     except Exception as e:
         logger.error(f"List agents error: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/mode", methods=["GET"])
+def get_mode():
+    return jsonify({
+        "success": True,
+        "mode": "mock" if USE_MOCK_AGENTS else "real",
+        "message": "Current mode: " + ("Mock (agents decoupled)" if USE_MOCK_AGENTS else "Real agents")
+    })
 
 
 @app.errorhandler(413)
@@ -335,10 +383,26 @@ def internal_error(e):
 def main():
     host = os.getenv("FLASK_HOST", "0.0.0.0")
     port = int(os.getenv("FLASK_PORT", 5000))
-    debug = os.getenv("FLASK_DEBUG", "False").lower() == "true"
+    debug = os.getenv("FLASK_DEBUG", "True").lower() == "true"
     
-    logger.info(f"Starting Math Learning Agent Web UI")
-    logger.info(f"Host: {host}, Port: {port}, Debug: {debug}")
+    logger.info("=" * 60)
+    logger.info("  Math Learning Agent Web UI")
+    logger.info("=" * 60)
+    logger.info(f"  Mode: {'Mock (agents decoupled)' if USE_MOCK_AGENTS else 'Real agents'}")
+    logger.info(f"  Host: {host}")
+    logger.info(f"  Port: {port}")
+    logger.info(f"  Debug: {debug}")
+    logger.info("=" * 60)
+    logger.info("  Available endpoints:")
+    logger.info("    GET  /                      - Homepage")
+    logger.info("    GET  /api/health           - Health check")
+    logger.info("    POST /api/chat             - Chat with agent")
+    logger.info("    POST /api/upload/pdf       - Upload PDF")
+    logger.info("    POST /api/upload/image     - Upload image")
+    logger.info("    GET  /api/questions        - List questions")
+    logger.info("    GET  /api/questions/search - Search questions")
+    logger.info("    GET  /api/questions/stats  - Question stats")
+    logger.info("=" * 60)
     
     app.run(host=host, port=port, debug=debug)
 
