@@ -1,8 +1,13 @@
 """
-Flask路由实现
+Flask路由实现（Web表现层）
 
-这是Web表现层的核心，处理所有HTTP请求。
-只依赖 IAgentService 接口，不依赖任何具体实现。
+这是 Web 表现层的核心，处理所有 HTTP 请求。
+只依赖桥接器层（src/interface/），不依赖任何具体的 Agent 实现。
+
+设计模式：桥接器模式
+- Web 层只依赖桥接器（AgentService）
+- 桥接器内部调用具体的 Agent 实现
+- 可以通过配置切换 Mock/Real Agent
 """
 import os
 import logging
@@ -13,24 +18,24 @@ from typing import Optional
 from flask import Flask, render_template, request, jsonify, session
 from flask_cors import CORS
 
-from src.interface import IAgentService, UploadResult
+from src.interface import AgentService, UploadResult, get_service
 
 logger = logging.getLogger(__name__)
 
 
-def create_app(agent_service: Optional[IAgentService] = None) -> Flask:
+def create_app(agent_service: Optional[AgentService] = None, use_mock: bool = True) -> Flask:
     """
-    创建Flask应用
+    创建 Flask 应用
     
     Args:
-        agent_service: Agent服务实现（可以是Mock或真实实现）
+        agent_service: 自定义的 Agent 服务（可选）
+        use_mock: 是否使用 Mock Agent（默认 True）
     
     Returns:
-        Flask: Flask应用实例
+        Flask: Flask 应用实例
     """
     app = Flask(__name__)
     
-    # 配置
     app.secret_key = os.getenv("FLASK_SECRET_KEY", "math-learning-agent-secret-key-2024-dev")
     app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
     app.config["UPLOAD_FOLDER"] = "./data/uploads"
@@ -38,21 +43,16 @@ def create_app(agent_service: Optional[IAgentService] = None) -> Flask:
     
     CORS(app)
     
-    # 确保目录存在
     Path(app.config["UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
     Path(app.config["TEMP_FOLDER"]).mkdir(parents=True, exist_ok=True)
     
-    # 如果没有提供service，使用Mock
     if agent_service is None:
-        from .mock_service import get_mock_service
-        agent_service = get_mock_service()
+        agent_service = get_service(use_mock=use_mock)
     
-    # 存储service引用
     app.agent_service = agent_service
     
     logger.info(f"Flask app created with service type: {type(agent_service).__name__}")
     
-    # 注册路由
     _register_routes(app)
     
     return app
@@ -64,7 +64,7 @@ def _register_routes(app: Flask):
     service = app.agent_service
     
     def get_or_create_session() -> str:
-        """获取或创建会话ID"""
+        """获取或创建会话 ID"""
         if "session_id" not in session:
             session["session_id"] = f"session_{datetime.now().strftime('%Y%m%d%H%M%S')}_{os.urandom(4).hex()}"
         return session["session_id"]
@@ -119,7 +119,7 @@ def _register_routes(app: Flask):
     
     @app.route("/api/upload/pdf", methods=["POST"])
     def upload_pdf():
-        """上传PDF"""
+        """上传 PDF"""
         try:
             if "file" not in request.files:
                 return jsonify({"error": "No file part"}), 400
@@ -132,7 +132,6 @@ def _register_routes(app: Flask):
             if not file.filename.lower().endswith(".pdf"):
                 return jsonify({"error": "Only PDF files are allowed"}), 400
             
-            # 保存文件
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
             safe_filename = f"{timestamp}_{Path(file.filename).stem}.pdf"
             save_path = Path(app.config["UPLOAD_FOLDER"]) / safe_filename
@@ -140,7 +139,6 @@ def _register_routes(app: Flask):
             file.save(str(save_path))
             logger.info(f"PDF uploaded: {save_path}")
             
-            # 获取选项
             start_page = request.form.get("start_page", 1)
             end_page = request.form.get("end_page")
             
@@ -149,7 +147,6 @@ def _register_routes(app: Flask):
             if isinstance(end_page, str) and end_page:
                 end_page = int(end_page) if end_page.isdigit() else None
             
-            # 处理文件
             result = service.process_pdf(
                 file_path=str(save_path),
                 options={
@@ -195,7 +192,6 @@ def _register_routes(app: Flask):
             if file_ext not in allowed_extensions:
                 return jsonify({"error": f"Only image files allowed: {allowed_extensions}"}), 400
             
-            # 保存文件
             timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
             safe_filename = f"{timestamp}_{Path(file.filename).stem}{file_ext}"
             save_path = Path(app.config["UPLOAD_FOLDER"]) / safe_filename
@@ -203,7 +199,6 @@ def _register_routes(app: Flask):
             file.save(str(save_path))
             logger.info(f"Image uploaded: {save_path}")
             
-            # 处理文件
             result = service.process_image(
                 file_path=str(save_path)
             )
@@ -338,7 +333,7 @@ def _register_routes(app: Flask):
     
     @app.route("/api/agents", methods=["GET"])
     def list_agents():
-        """列出可用Agent"""
+        """列出可用 Agent"""
         try:
             agents_info = service.list_agents()
             return jsonify({
@@ -359,7 +354,6 @@ def _register_routes(app: Flask):
             "message": "Current mode: Mock (agents decoupled)"
         })
     
-    # 错误处理器
     @app.errorhandler(413)
     def too_large(e):
         return jsonify({"error": "File too large. Maximum size is 100MB."}), 413
@@ -374,7 +368,7 @@ def _register_routes(app: Flask):
 
 
 def run_app(app: Flask, host: str = "0.0.0.0", port: int = 5000, debug: bool = True):
-    """运行Flask应用"""
+    """运行 Flask 应用"""
     logger.info("=" * 60)
     logger.info("  Math Learning Agent Web UI")
     logger.info("=" * 60)

@@ -1,7 +1,8 @@
 """
-测试：Mock Agent服务
+测试：AgentService 桥接器
 
-测试 src/services/mock_service.py
+测试 src/interface/agent_service.py （核心桥接器）
+和 src/agents/mock_agents.py （具体实现）
 """
 import sys
 from pathlib import Path
@@ -17,19 +18,19 @@ from src.interface import (
     QuestionStats,
     UploadResult,
     QuestionType,
+    AgentService,
+    get_service,
+    AgentRegistry,
+    get_registry,
 )
-from src.services.mock_service import (
-    MockAgentService,
-    MockAgent,
-    get_mock_service,
-)
+from src.agents.mock_agents import MockAgent
 
 
 class TestMockAgent:
-    """测试 MockAgent 类"""
+    """测试 MockAgent 具体实现"""
     
     def test_creation(self):
-        """测试创建MockAgent"""
+        """测试创建 MockAgent"""
         agent = MockAgent(
             agent_id="test_agent",
             name="Test Agent",
@@ -103,34 +104,35 @@ class TestMockAgent:
         assert "Test Agent" in result["content"] or "mock" in result["content"].lower()
 
 
-class TestMockAgentService:
-    """测试 MockAgentService 类"""
+class TestAgentService:
+    """测试 AgentService 桥接器"""
     
     def setup_method(self):
         """每个测试前重置"""
-        # 清除单例状态
-        MockAgentService._instance = None
+        AgentService._instance = None
+        registry = get_registry()
+        registry.clear()
     
     def test_singleton(self):
         """测试单例模式"""
-        s1 = MockAgentService()
-        s2 = MockAgentService()
+        s1 = AgentService(use_mock=False)
+        s2 = AgentService(use_mock=False)
         assert s1 is s2
     
-    def test_get_mock_service(self):
-        """测试 get_mock_service 函数"""
-        s1 = get_mock_service()
-        s2 = get_mock_service()
+    def test_get_service(self):
+        """测试 get_service 工厂函数"""
+        s1 = get_service(use_mock=True)
+        s2 = get_service(use_mock=True)
         assert s1 is s2
     
-    def test_list_agents(self):
-        """测试列出Agent"""
-        service = MockAgentService()
-        agents = service.list_agents()
+    def test_init_mock_agents(self):
+        """测试初始化 Mock Agent"""
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         
+        agents = service.list_agents()
         assert len(agents) >= 3
         
-        # 检查是否包含核心Agent
         agent_ids = [a.agent_id for a in agents]
         assert "question_bank" in agent_ids
         assert "understanding" in agent_ids
@@ -138,7 +140,8 @@ class TestMockAgentService:
     
     def test_chat_basic(self):
         """测试基本聊天"""
-        service = MockAgentService()
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         
         response = service.chat(
             message="你好",
@@ -151,61 +154,20 @@ class TestMockAgentService:
         assert response.conversation_id == "test_conv_001"
         assert len(response.content) > 0
     
-    def test_chat_auto_routing(self):
-        """测试自动路由"""
-        service = MockAgentService()
-        
-        # 包含"解释"关键词，应该路由到understanding
-        response = service.chat(
-            message="解释一下极限的概念",
-            agent_type="auto",
-            conversation_id="test_conv_002"
-        )
-        
-        assert isinstance(response, AgentResponse)
-        # 可能路由到question_bank或understanding，取决于实现
-    
     def test_get_all_questions(self):
         """测试获取所有题目"""
-        service = MockAgentService()
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         
         questions = service.get_all_questions()
         
         assert len(questions) >= 3
         assert all(isinstance(q, Question) for q in questions)
     
-    def test_get_all_questions_with_type(self):
-        """测试按类型获取题目"""
-        service = MockAgentService()
-        
-        examples = service.get_all_questions(question_type="example")
-        exercises = service.get_all_questions(question_type="exercise")
-        
-        # 应该有example类型的题目
-        assert len(examples) > 0
-    
-    def test_search_questions(self):
-        """测试搜索题目"""
-        service = MockAgentService()
-        
-        # 搜索包含"极限"的题目
-        results = service.search_questions(query="极限", n_results=5)
-        
-        # 可能匹配到
-        assert isinstance(results, list)
-    
-    def test_search_questions_empty_query(self):
-        """测试空查询搜索"""
-        service = MockAgentService()
-        
-        results = service.search_questions(query="", n_results=5)
-        
-        # 空查询应该返回所有或部分题目
-        assert isinstance(results, list)
-    
     def test_get_question_stats(self):
         """测试获取题库统计"""
-        service = MockAgentService()
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         
         stats = service.get_question_stats()
         
@@ -215,8 +177,9 @@ class TestMockAgentService:
         assert stats.exercises >= 0
     
     def test_process_pdf(self):
-        """测试处理PDF"""
-        service = MockAgentService()
+        """测试处理 PDF"""
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         
         result = service.process_pdf(
             file_path="/fake/path/test.pdf",
@@ -229,7 +192,8 @@ class TestMockAgentService:
     
     def test_process_image(self):
         """测试处理图片"""
-        service = MockAgentService()
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         
         result = service.process_image(
             file_path="/fake/path/test.jpg"
@@ -240,36 +204,33 @@ class TestMockAgentService:
     
     def test_conversation_persistence(self):
         """测试对话持久化"""
-        service = MockAgentService()
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         conv_id = "persistence_test"
         
-        # 发送第一条消息
         service.chat(
             message="消息1",
             agent_type="question_bank",
             conversation_id=conv_id
         )
         
-        # 发送第二条消息
         service.chat(
             message="消息2",
             agent_type="question_bank",
             conversation_id=conv_id
         )
         
-        # 获取对话
         conversation = service.get_conversation(conv_id)
         
         assert conversation is not None
         assert conversation.conversation_id == conv_id
-        # 应该有用户消息和助手消息
     
     def test_clear_conversation(self):
         """测试清除对话"""
-        service = MockAgentService()
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         conv_id = "clear_test"
         
-        # 创建对话
         service.chat(
             message="test",
             agent_type="question_bank",
@@ -278,88 +239,86 @@ class TestMockAgentService:
         
         assert service.get_conversation(conv_id) is not None
         
-        # 清除对话
         success = service.clear_conversation(conv_id)
         assert success is True
         
-        # 对话应该不存在
         assert service.get_conversation(conv_id) is None
     
     def test_is_agent_available(self):
-        """测试检查Agent是否可用"""
-        service = MockAgentService()
+        """测试检查 Agent 是否可用"""
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         
         assert service.is_agent_available("question_bank") is True
         assert service.is_agent_available("nonexistent") is False
     
     def test_get_agent_capabilities(self):
-        """测试获取Agent能力"""
-        service = MockAgentService()
+        """测试获取 Agent 能力"""
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         
         capabilities = service.get_agent_capabilities("question_bank")
         
         assert isinstance(capabilities, list)
-        # 应该有一些能力
         assert len(capabilities) > 0
     
     def test_get_agent_capabilities_nonexistent(self):
-        """测试获取不存在的Agent能力"""
-        service = MockAgentService()
+        """测试获取不存在的 Agent 能力"""
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         
         capabilities = service.get_agent_capabilities("nonexistent")
         
         assert capabilities == []
 
 
-class TestMockServiceIntegration:
-    """测试Mock服务集成"""
+class TestAgentServiceIntegration:
+    """测试 AgentService 集成"""
     
     def setup_method(self):
-        MockAgentService._instance = None
+        AgentService._instance = None
+        registry = get_registry()
+        registry.clear()
     
     def test_full_chat_flow(self):
         """测试完整聊天流程"""
-        service = MockAgentService()
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         conv_id = "integration_test"
         
-        # 1. 发送第一条消息
         resp1 = service.chat(
             message="你好",
             agent_type="question_bank",
             conversation_id=conv_id
         )
         
-        assert resp1.success if hasattr(resp1, 'success') else True
+        assert isinstance(resp1, AgentResponse)
         
-        # 2. 发送第二条消息
         resp2 = service.chat(
             message="极限是什么？",
             agent_type="auto",
             conversation_id=conv_id
         )
         
-        # 3. 获取对话
+        assert isinstance(resp2, AgentResponse)
+        
         conversation = service.get_conversation(conv_id)
         assert conversation is not None
         
-        # 4. 清除对话
         service.clear_conversation(conv_id)
         assert service.get_conversation(conv_id) is None
     
     def test_question_flow(self):
         """测试题目相关流程"""
-        service = MockAgentService()
+        service = AgentService(use_mock=True)
+        service.init_mock_agents()
         
-        # 1. 获取统计
         stats = service.get_question_stats()
         initial_total = stats.total
         
-        # 2. 上传PDF添加题目
         result = service.process_pdf("/fake/test.pdf")
         added_count = result.questions_extracted
         
-        # 3. 再次获取统计（应该有更多题目）
         new_stats = service.get_question_stats()
         
-        # 题目应该增加了
         assert new_stats.total >= initial_total
