@@ -1,6 +1,7 @@
 import os
 import logging
 from abc import ABC, abstractmethod
+from enum import Enum
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 
@@ -13,6 +14,18 @@ from src.prompts import PromptManager
 logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+
+class AgentRole(Enum):
+    """Agent 角色枚举"""
+    QUESTION_BANK = "question_bank"
+    ASSESSMENT = "assessment"
+    PLANNING = "planning"
+    LEARNING = "learning"
+    UNDERSTANDING = "understanding"
+    VERIFICATION = "verification"
+    REVIEW = "review"
+    ORCHESTRATOR = "orchestrator"
 
 
 class BaseAgent(ABC):
